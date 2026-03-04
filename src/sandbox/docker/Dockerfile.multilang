@@ -1,0 +1,53 @@
+FROM ubuntu:22.04
+
+ARG LANG=python
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG_ID=${LANG}
+
+# Common tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git patch curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Language-specific toolchains
+RUN set -eux; \
+    case "${LANG}" in \
+        python) \
+            apt-get update && apt-get install -y --no-install-recommends \
+                python3 python3-pip python3-venv && \
+            rm -rf /var/lib/apt/lists/* ;; \
+        javascript) \
+            curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+            apt-get install -y --no-install-recommends nodejs && \
+            rm -rf /var/lib/apt/lists/* ;; \
+        java) \
+            apt-get update && apt-get install -y --no-install-recommends \
+                openjdk-17-jdk maven && \
+            rm -rf /var/lib/apt/lists/* ;; \
+        go) \
+            curl -fsSL https://go.dev/dl/go1.22.0.linux-amd64.tar.gz | \
+                tar -C /usr/local -xzf - && \
+            ln -s /usr/local/go/bin/go /usr/local/bin/go ;; \
+        rust) \
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+                sh -s -- -y --default-toolchain stable && \
+            ln -s /root/.cargo/bin/* /usr/local/bin/ ;; \
+        ruby) \
+            apt-get update && apt-get install -y --no-install-recommends \
+                ruby ruby-bundler && \
+            rm -rf /var/lib/apt/lists/* ;; \
+        csharp) \
+            apt-get update && apt-get install -y --no-install-recommends \
+                dotnet-sdk-8.0 && \
+            rm -rf /var/lib/apt/lists/* ;; \
+        *) \
+            echo "Warning: no specific toolchain for LANG=${LANG}" ;; \
+    esac
+
+WORKDIR /workspace
+
+COPY entrypoint_multilang.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

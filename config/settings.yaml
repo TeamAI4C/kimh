@@ -1,0 +1,59 @@
+# ──────────────────────────────────────────────
+# FindVuln Pipeline Configuration
+# ──────────────────────────────────────────────
+
+# CVE Collector (NVD API 2.0)
+collector:
+  nvd_api_url: "https://services.nvd.nist.gov/rest/json/cves/2.0"
+  api_key: ""               # set NVD_API_KEY env var or fill here
+  corpus_path: "data/cve_corpus"
+  results_per_page: 100
+  rate_limit_delay_no_key: 6.0              # seconds between requests (no API key)
+  rate_limit_delay_with_key: 0.6            # seconds between requests (with API key)
+  request_timeout: 60                       # seconds
+
+# RAG Knowledge Base
+rag:
+  openai_api_key: ""                           # set OPENAI_API_KEY env var or fill here (embeddings)
+  embedding_model: "text-embedding-3-large"
+  embedding_dimensions: 1536
+  collection_name: "vuln_patches"
+  chunk_size: 1200
+  chunk_overlap: 200
+  top_k: 3
+  vectordb_path: "data/vectordb"
+  corpus_path: "data/cve_corpus"
+
+# CodeQL
+codeql:
+  cli_path: "codeql"                       # or absolute path
+  language: "auto"                         # "auto" | "cpp" | "python" | "go" | ...
+  query_mode: "pack"                       # "pack" (built-in security suite) | "custom" (local .ql)
+  custom_query_dir: "src/codeql/queries"   # used when query_mode = "custom"
+  threads: 4
+  timeout_seconds: 7200
+  build_command: null                      # null = auto, or "make", "mvn compile", etc.
+
+# LLM Agent
+agent:
+  provider: "openai"                     # anthropic | openai
+  anthropic_api_key: null                   # set ANTHROPIC_API_KEY env var or fill here
+  openai_api_key: ""                      # set OPENAI_API_KEY env var or fill here (when provider=openai)
+  model: "gpt-5.2"
+  temperature: 0.0
+  max_tokens: 8192
+  max_diff_retries: 3
+
+# Docker Sandbox
+sandbox:
+  base_image: "ubuntu:22.04"
+  container_prefix: "findvuln-sandbox"
+  timeout_seconds: 120
+  asan_flags: "-fsanitize=address -fno-omit-frame-pointer -g"
+  compiler: "gcc"
+  verification_strategy: "auto"            # "auto" | "asan" | "test_runner" | "build_and_test" | "skip"
+
+# Orchestrator
+orchestrator:
+  max_feedback_loops: 5
+  log_level: "INFO"

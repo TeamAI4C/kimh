@@ -1,0 +1,4 @@
+name: findvuln/cpg-tests
+version: 0.0.1
+dependencies:
+  codeql/cpp-all: "*"

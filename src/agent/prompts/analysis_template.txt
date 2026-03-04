@@ -1,0 +1,23 @@
+## CodeQL Static Analysis Result (Sequential Chain)
+
+**Language:** {{LANGUAGE_NAME}}
+
+```json
+{{CODEQL_JSON_RESULT}}
+```
+
+## Relevant Historical Patches (RAG Context)
+
+{{RAG_CONTEXT}}
+
+## Source Code of Affected File
+
+```{{CODE_FENCE}}
+{{SOURCE_CODE}}
+```
+
+---
+
+Generate the Unified Diff patch that fixes the vulnerability described in the chain above.
+Apply the idiomatic fix for {{LANGUAGE_NAME}} — use the language's standard libraries and conventions.
+Remember: output ONLY the raw diff, nothing else.

@@ -1,0 +1,26 @@
+## Previous Patch Attempt Failed
+
+The patch you generated was applied and the program was compiled/tested. It **failed** with the following error:
+
+### Error Type: {{ERROR_TYPE}}
+
+```
+{{ERROR_LOG}}
+```
+
+### Original CodeQL Chain (for reference)
+
+```json
+{{CODEQL_JSON_RESULT}}
+```
+
+### Your Previous Diff
+
+```diff
+{{PREVIOUS_DIFF}}
+```
+
+---
+
+Analyze the error, determine what went wrong in your previous patch, and generate a corrected Unified Diff.
+Remember: output ONLY the raw diff, nothing else.
