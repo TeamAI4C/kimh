@@ -39,6 +39,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_analyze.add_argument("--max-rounds", type=int, default=6, help="Max critique rounds per finding")
     p_analyze.add_argument("--codex-cli", default=None, help="Codex CLI command")
     p_analyze.add_argument("--claude-cli", default=None, help="Claude CLI command")
+    p_analyze.add_argument(
+        "--codex-ql",
+        dest="codex_ql",
+        action="store_true",
+        default=None,
+        help="Enable Codex-generated QL queries (default: config.analysis.codex_ql.enabled)",
+    )
+    p_analyze.add_argument(
+        "--no-codex-ql",
+        dest="codex_ql",
+        action="store_false",
+        help="Disable Codex-generated QL queries",
+    )
+    p_analyze.add_argument("--ql-max-queries", type=int, default=None, help="Max generated QL queries per target")
+    p_analyze.add_argument("--ql-max-retries", type=int, default=None, help="Max compile-fix retries per query")
 
     p_validate = sub.add_parser("validate", help="Run validation and write final report")
     p_validate.add_argument("--run-id", required=True, help="Run identifier")
@@ -81,6 +96,60 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Maximum number of findings to render as PoC Markdown reports",
     )
+    p_validate.add_argument(
+        "--execution-owner",
+        default=None,
+        choices=["codex-host", "oracle"],
+        help="Validation execution owner (default: config.validation.execution_owner)",
+    )
+
+    p_e2e = sub.add_parser("e2e", help="Run ingest -> analyze -> validate(multi-shot) -> PoC markdown")
+    p_e2e.add_argument("--manifest", required=True, help="Path to manifest (yaml/json)")
+    p_e2e.add_argument("--run-id", required=True, help="Run identifier")
+    p_e2e.add_argument(
+        "--topology",
+        default="parallel-adjudicated",
+        choices=["parallel-adjudicated", "codex-single-pass"],
+        help="Adjudication topology",
+    )
+    p_e2e.add_argument("--max-rounds", type=int, default=6, help="Max critique rounds per finding")
+    p_e2e.add_argument("--verify-runs", type=int, default=2, help="Verification runs target for validation")
+    p_e2e.add_argument("--max-shots", type=int, default=None, help="Max multi-shot attempts")
+    p_e2e.add_argument(
+        "--strategy",
+        default="auto",
+        choices=["auto", "asan", "test_runner", "build_and_test", "skip"],
+        help="Validation strategy override",
+    )
+    p_e2e.add_argument("--codex-cli", default=None, help="Codex CLI command")
+    p_e2e.add_argument("--claude-cli", default=None, help="Claude CLI command")
+    p_e2e.add_argument(
+        "--execution-owner",
+        default="codex-host",
+        choices=["codex-host", "oracle"],
+        help="Validation execution owner for multi-shot",
+    )
+    p_e2e.add_argument(
+        "--poc-max-findings",
+        type=int,
+        default=None,
+        help="Maximum number of findings to render as PoC Markdown reports",
+    )
+    p_e2e.add_argument(
+        "--codex-ql",
+        dest="codex_ql",
+        action="store_true",
+        default=None,
+        help="Enable Codex-generated QL queries (default: config.analysis.codex_ql.enabled)",
+    )
+    p_e2e.add_argument(
+        "--no-codex-ql",
+        dest="codex_ql",
+        action="store_false",
+        help="Disable Codex-generated QL queries",
+    )
+    p_e2e.add_argument("--ql-max-queries", type=int, default=None, help="Max generated QL queries per target")
+    p_e2e.add_argument("--ql-max-retries", type=int, default=None, help="Max compile-fix retries per query")
 
     return parser
 
@@ -106,6 +175,12 @@ def main() -> None:
 
         if args.command == "analyze":
             llm_cfg = cfg.get("llm", {})
+            codex_ql_cfg = cfg.get("analysis", {}).get("codex_ql", {})
+            codex_ql_enabled = (
+                bool(args.codex_ql)
+                if args.codex_ql is not None
+                else bool(codex_ql_cfg.get("enabled", True))
+            )
             out = run_analyze(
                 run_id=args.run_id,
                 runs_root=runs_root,
@@ -114,6 +189,9 @@ def main() -> None:
                 max_rounds=args.max_rounds,
                 codex_cli=args.codex_cli or str(llm_cfg.get("codex_cli", "codex")),
                 claude_cli=args.claude_cli or str(llm_cfg.get("claude_cli", "claude")),
+                codex_ql_enabled=codex_ql_enabled,
+                ql_max_queries=int(args.ql_max_queries or codex_ql_cfg.get("max_queries", 6)),
+                ql_max_retries=int(args.ql_max_retries or codex_ql_cfg.get("max_retries", 2)),
             )
             print(f"Analyze result: {out}")
             return
@@ -121,6 +199,7 @@ def main() -> None:
         if args.command == "validate":
             llm_cfg = cfg.get("llm", {})
             validation_cfg = cfg.get("validation", {})
+            execution_owner = args.execution_owner or str(validation_cfg.get("execution_owner", "codex-host"))
             if args.multi_shot:
                 json_report, html_report = run_validate_multishot(
                     run_id=args.run_id,
@@ -130,6 +209,7 @@ def main() -> None:
                     strategy=args.strategy,
                     max_shots=args.max_shots or int(validation_cfg.get("multishot_max_shots", 6)),
                     codex_cli=args.codex_cli or str(llm_cfg.get("codex_cli", "codex exec -")),
+                    execution_owner=execution_owner,
                 )
             else:
                 json_report, html_report = run_validate(
@@ -138,6 +218,7 @@ def main() -> None:
                     config=cfg,
                     verify_runs=args.verify_runs,
                     strategy=args.strategy,
+                    execution_owner=execution_owner,
                 )
             print(f"JSON report: {json_report}")
             print(f"HTML report: {html_report}")
@@ -152,6 +233,66 @@ def main() -> None:
                     codex_cli=args.poc_codex_cli or str(llm_cfg.get("codex_cli", "codex exec -")),
                     max_findings=args.poc_max_findings,
                 )
+                print(f"PoC index: {poc_index}")
+                print(f"PoC reports generated: {report_count}")
+            return
+
+        if args.command == "e2e":
+            llm_cfg = cfg.get("llm", {})
+            analysis_cfg = cfg.get("analysis", {})
+            codex_ql_cfg = analysis_cfg.get("codex_ql", {})
+            validation_cfg = cfg.get("validation", {})
+            codex_ql_enabled = (
+                bool(args.codex_ql)
+                if args.codex_ql is not None
+                else bool(codex_ql_cfg.get("enabled", True))
+            )
+
+            bundle = run_ingest(
+                manifest_path=args.manifest,
+                run_id=args.run_id,
+                runs_root=runs_root,
+                detect_only=True,
+            )
+            print(f"Scan bundle: {bundle}")
+
+            analyze_result = run_analyze(
+                run_id=args.run_id,
+                runs_root=runs_root,
+                config=cfg,
+                topology=args.topology or str(analysis_cfg.get("topology", "parallel-adjudicated")),
+                max_rounds=int(args.max_rounds or int(analysis_cfg.get("max_rounds", 6))),
+                codex_cli=args.codex_cli or str(llm_cfg.get("codex_cli", "codex")),
+                claude_cli=args.claude_cli or str(llm_cfg.get("claude_cli", "claude")),
+                codex_ql_enabled=codex_ql_enabled,
+                ql_max_queries=int(args.ql_max_queries or codex_ql_cfg.get("max_queries", 6)),
+                ql_max_retries=int(args.ql_max_retries or codex_ql_cfg.get("max_retries", 2)),
+            )
+            print(f"Analyze result: {analyze_result}")
+
+            json_report, html_report = run_validate_multishot(
+                run_id=args.run_id,
+                runs_root=runs_root,
+                config=cfg,
+                verify_runs=int(args.verify_runs or int(validation_cfg.get("verify_runs", 2))),
+                strategy=args.strategy,
+                max_shots=args.max_shots or int(validation_cfg.get("multishot_max_shots", 6)),
+                codex_cli=args.codex_cli or str(llm_cfg.get("codex_cli", "codex exec -")),
+                execution_owner=args.execution_owner or str(validation_cfg.get("execution_owner", "codex-host")),
+            )
+            print(f"JSON report: {json_report}")
+            print(f"HTML report: {html_report}")
+
+            poc_index, report_count = generate_poc_markdown_reports(
+                run_id=args.run_id,
+                runs_root=runs_root,
+                config=cfg,
+                codex_cli=args.codex_cli or str(llm_cfg.get("codex_cli", "codex exec -")),
+                max_findings=args.poc_max_findings,
+            )
+            if report_count == 0:
+                print("PoC reports generated: 0 (no confirmed/probable findings)")
+            else:
                 print(f"PoC index: {poc_index}")
                 print(f"PoC reports generated: {report_count}")
             return

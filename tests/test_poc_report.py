@@ -46,7 +46,9 @@ def _seed_run(runs_root: Path, run_id: str) -> None:
                     "target_id": "demo-target-01",
                     "snapshot_root": "/tmp/snapshot",
                     "language_profile": {"codeql_language": "python"},
+                    "findings_total_raw": 1,
                     "findings_total": 1,
+                    "findings_excluded_by_path": 0,
                     "findings_selected": 1,
                     "findings": [
                         {

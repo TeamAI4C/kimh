@@ -7,7 +7,12 @@ description: Runtime validation and final status assignment for FindVuln V2. Use
 
 1. Load `analyze_result.json` and map findings to target snapshots.
 2. Run verification only for consensus-vulnerable findings.
-3. Execute validator up to `verify_runs` times with language-aware strategy.
+3. Enforce real verification policy:
+   - reject `strategy=skip`
+   - require at least one executed validation evidence for consensus-vulnerable findings
+4. Execute validator up to `verify_runs` times with language-aware strategy.
+   - `execution_owner=oracle` uses SandboxOracle
+   - `execution_owner=codex-host` is used with multi-shot host-docker command flow
 4. Record each run as `ValidationEvidence`.
 5. Resolve final status:
    - `confirmed`: positive evidence in all runs
@@ -17,4 +22,5 @@ description: Runtime validation and final status assignment for FindVuln V2. Use
 6. Write `final_report.json` and `final_report.html`.
 7. Optionally generate bug-bounty style Markdown PoC reports from artifacts via Codex:
    - `findvuln validate --run-id <id> --poc-md`
+   - default target statuses for PoC markdown: `confirmed`, `probable`
 8. For iterative trigger validation, switch to `findvuln-multishot-validate` workflow and run `findvuln validate --multi-shot`.

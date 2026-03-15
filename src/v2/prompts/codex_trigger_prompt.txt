@@ -7,6 +7,9 @@ Return ONLY one JSON object with this exact schema:
 {{SCHEMA_JSON}}
 
 Do not output markdown or explanation.
+When proposing host execution, set `execution_target` to `host_docker`, include
+all required `prepare_commands`, a non-empty `verify_command`, and a non-empty
+`expected_signal` that can be matched in command output.
 
 Shot: {{SHOT_INDEX}}
 Target: {{TARGET_ID}}

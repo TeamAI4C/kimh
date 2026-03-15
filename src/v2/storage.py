@@ -16,6 +16,7 @@ def ensure_run_layout(run_id: str, runs_root: str) -> dict[str, Path]:
         "ingest": base / "ingest",
         "analyze": base / "analyze",
         "validate": base / "validate",
+        "codeql_generated": base / "codeql_generated",
         "logs": base / "logs",
         "snapshots": base / "snapshots",
         "mirrors": base / "mirrors",

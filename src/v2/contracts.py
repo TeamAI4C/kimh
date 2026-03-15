@@ -80,6 +80,13 @@ class ValidationEvidence:
     verdict: str
     exit_code: int
     is_positive: bool
+    executed: bool = False
+    execution_owner: str = "oracle"
+    execution_target: str = ""
+    prepare_commands: list[str] = field(default_factory=list)
+    verify_command: str = ""
+    expected_signal: str = ""
+    signal_matched: bool = False
     stdout_tail: str = ""
     stderr_tail: str = ""
     asan_report: str = ""
@@ -173,6 +180,7 @@ class ScanTarget:
     codeql_db_path: str
     pov_file: str | None
     file_index: list[str] = field(default_factory=list)
+    exclude_paths: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -199,8 +207,14 @@ class AnalyzeTargetResult:
     target_id: str
     snapshot_root: str
     language_profile: dict[str, Any]
+    findings_total_raw: int
     findings_total: int
+    findings_excluded_by_path: int
     findings_selected: int
+    generated_queries_total: int = 0
+    generated_queries_compiled: int = 0
+    generated_queries_failed: int = 0
+    generated_query_dir: str = ""
     findings: list[FindingAnalysis] = field(default_factory=list)
     model_contribution: dict[str, dict[str, int]] = field(default_factory=dict)
 
@@ -209,8 +223,14 @@ class AnalyzeTargetResult:
             "target_id": self.target_id,
             "snapshot_root": self.snapshot_root,
             "language_profile": self.language_profile,
+            "findings_total_raw": self.findings_total_raw,
             "findings_total": self.findings_total,
+            "findings_excluded_by_path": self.findings_excluded_by_path,
             "findings_selected": self.findings_selected,
+            "generated_queries_total": self.generated_queries_total,
+            "generated_queries_compiled": self.generated_queries_compiled,
+            "generated_queries_failed": self.generated_queries_failed,
+            "generated_query_dir": self.generated_query_dir,
             "findings": [f.to_dict() for f in self.findings],
             "model_contribution": self.model_contribution,
         }

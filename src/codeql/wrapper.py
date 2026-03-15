@@ -181,6 +181,26 @@ class CodeQLRunner:
         ])
         return sarif_out
 
+    def compile_query(
+        self,
+        query_file: str | Path,
+        *,
+        cwd: str | Path | None = None,
+    ) -> tuple[bool, str]:
+        """Compile a QL query and return (success, combined_output)."""
+        cmd = [self.cli, "query", "compile", str(Path(query_file).resolve())]
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=self.timeout,
+            cwd=str(cwd) if cwd else None,
+        )
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        combined = "\n".join(x for x in (out, err) if x).strip()
+        return proc.returncode == 0, combined
+
     def run_all_queries(
         self,
         db_path: str | Path,

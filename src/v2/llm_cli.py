@@ -5,7 +5,7 @@ import shlex
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,9 @@ class TriggerPlan:
     model: str
     should_attempt: bool
     trigger_kind: str
+    execution_target: str = ""
+    prepare_commands: list[str] = field(default_factory=list)
+    verify_command: str = ""
     command: str = ""
     pov_stdin: str = ""
     expected_signal: str = ""
@@ -36,8 +39,12 @@ class TriggerPlan:
 
 
 class CLIModelExecutor:
-    def __init__(self, timeout_seconds: int = 300):
-        self.timeout_seconds = timeout_seconds
+    def __init__(self, timeout_seconds: int | None = 300):
+        if timeout_seconds is None:
+            self.timeout_seconds: int | None = None
+        else:
+            value = int(timeout_seconds)
+            self.timeout_seconds = value if value > 0 else None
 
     def run(self, model: str, command: str, prompt: str) -> CLIExecutionResult:
         prompt_file: Path | None = None
@@ -65,13 +72,18 @@ class CLIModelExecutor:
                 error="" if proc.returncode == 0 else f"non-zero exit ({proc.returncode})",
             )
         except subprocess.TimeoutExpired:
+            timeout_label = (
+                f"{self.timeout_seconds}s"
+                if self.timeout_seconds is not None
+                else "no-timeout"
+            )
             return CLIExecutionResult(
                 model=model,
                 ok=False,
                 returncode=-1,
                 stdout="",
                 stderr="",
-                error=f"timeout after {self.timeout_seconds}s",
+                error=f"timeout after {timeout_label}",
             )
         except Exception as exc:
             return CLIExecutionResult(
@@ -214,6 +226,15 @@ def parse_trigger_plan(model: str, output: str) -> TriggerPlan:
     if trigger_kind not in {"none", "command", "pov_stdin"}:
         trigger_kind = "none"
 
+    execution_target = str(data.get("execution_target", "")).strip().lower()
+    if execution_target and execution_target not in {"host_docker"}:
+        execution_target = ""
+
+    prepare_commands_raw = data.get("prepare_commands", [])
+    prepare_commands: list[str] = []
+    if isinstance(prepare_commands_raw, list):
+        prepare_commands = [str(x).strip() for x in prepare_commands_raw if str(x).strip()]
+
     confidence_raw = data.get("confidence", 0.0)
     try:
         confidence = float(confidence_raw)
@@ -225,6 +246,9 @@ def parse_trigger_plan(model: str, output: str) -> TriggerPlan:
         model=model,
         should_attempt=should_attempt,
         trigger_kind=trigger_kind,
+        execution_target=execution_target,
+        prepare_commands=prepare_commands,
+        verify_command=str(data.get("verify_command", "")),
         command=str(data.get("command", "")),
         pov_stdin=str(data.get("pov_stdin", "")),
         expected_signal=str(data.get("expected_signal", "")),

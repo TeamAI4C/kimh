@@ -27,6 +27,7 @@ class TargetManifest:
     scan_mode: str
     codeql_db_path: str | None
     pov_file: str | None
+    exclude_paths: list[str]
 
 
 class IngestError(RuntimeError):
@@ -66,6 +67,10 @@ def _load_manifest(path: str) -> list[TargetManifest]:
         git_url = t.get("git_url")
         if not source_root and not git_url:
             raise IngestError(f"Target {name}: either source_root or git_url is required")
+        raw_exclude_paths = t.get("exclude_paths", [])
+        exclude_paths: list[str] = []
+        if isinstance(raw_exclude_paths, list):
+            exclude_paths = [str(x) for x in raw_exclude_paths if str(x).strip()]
 
         targets.append(
             TargetManifest(
@@ -77,6 +82,7 @@ def _load_manifest(path: str) -> list[TargetManifest]:
                 scan_mode=str(t.get("scan_mode", "pack")),
                 codeql_db_path=str(t.get("codeql_db_path")) if t.get("codeql_db_path") else None,
                 pov_file=str(t.get("pov_file")) if t.get("pov_file") else None,
+                exclude_paths=exclude_paths,
             )
         )
     return targets
@@ -155,6 +161,7 @@ def _sync_target(target: TargetManifest, run_paths: dict[str, Path], index: int)
         codeql_db_path=codeql_db,
         pov_file=target.pov_file,
         file_index=file_index,
+        exclude_paths=target.exclude_paths,
     )
 
 

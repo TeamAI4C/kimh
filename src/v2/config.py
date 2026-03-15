@@ -19,6 +19,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_consecutive_failures": 2,
         "model_timeout_seconds": 300,
         "prompt_template_path": "src/v2/prompts/codex_default_prompt.txt",
+        "codex_ql": {
+            "enabled": True,
+            "max_queries": 6,
+            "max_retries": 2,
+            "timeout_seconds": 0,
+            "prompt_template_path": "src/v2/prompts/codex_ql_query_prompt.txt",
+        },
+        "exclude_primary_path_globs": [
+            "test/**",
+            "tests/**",
+            "**/test/**",
+            "**/tests/**",
+            "**/testing/**",
+            "**/*_test.py",
+            "**/test_*.py",
+        ],
     },
     "llm": {
         "codex_cli": "codex exec --model gpt-5.3-codex -c 'reasoning_effort=\"xhigh\"' --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -",
@@ -27,6 +43,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "validation": {
         "verify_runs": 2,
         "strategy": "auto",
+        "execution_owner": "codex-host",
         "multishot_max_shots": 6,
         "multishot_required_positive": 2,
         "trigger_prompt_template_path": "src/v2/prompts/codex_trigger_prompt.txt",
@@ -42,7 +59,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "prompt_template_path": "src/v2/prompts/codex_poc_report_prompt.txt",
         "timeout_seconds": 300,
         "max_findings": 50,
-        "include_statuses": ["confirmed", "probable", "needs-human-review"],
+        "include_statuses": ["confirmed", "probable"],
     },
 }
 

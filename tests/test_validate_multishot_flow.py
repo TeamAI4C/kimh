@@ -21,6 +21,7 @@ def _base_config() -> dict:
         "validation": {
             "verify_runs": 2,
             "strategy": "auto",
+            "execution_owner": "oracle",
             "timeout_seconds": 5,
             "multishot_max_shots": 3,
             "multishot_required_positive": 1,
@@ -81,7 +82,9 @@ def _write_minimal_run(
                     "language_profile": {
                         "codeql_language": language,
                     },
+                    "findings_total_raw": 1,
                     "findings_total": 1,
+                    "findings_excluded_by_path": 0,
                     "findings_selected": 1,
                     "findings": [
                         {
@@ -172,6 +175,7 @@ def test_multishot_command_plan_drives_test_runner(monkeypatch, tmp_path: Path) 
         strategy="test_runner",
         max_shots=2,
         codex_cli="codex exec -",
+        execution_owner="oracle",
     )
 
     assert captured["custom_test_command"] == custom_cmd
@@ -255,6 +259,7 @@ def test_multishot_pov_plan_persists_artifact_for_asan(monkeypatch, tmp_path: Pa
         strategy="asan",
         max_shots=2,
         codex_cli="codex exec -",
+        execution_owner="oracle",
     )
 
     assert captured["source_file"] == str(src_file.resolve())
@@ -273,3 +278,163 @@ def test_multishot_pov_plan_persists_artifact_for_asan(monkeypatch, tmp_path: Pa
     assert evidence["trigger_kind"] == "pov_stdin"
     assert evidence["pov_artifact"] == str(pov_path)
     assert evidence["pov_sha256"] != ""
+
+
+def test_multishot_codex_host_uses_signal_match(monkeypatch, tmp_path: Path) -> None:
+    run_id = "multishot-codex-host"
+    target_id = "target-python-02"
+    runs_root = tmp_path / "runs"
+    snapshot_root = runs_root / run_id / "snapshots" / target_id
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    (snapshot_root / "dummy.py").write_text("print('ok')\n", encoding="utf-8")
+
+    _write_minimal_run(
+        run_id=run_id,
+        runs_root=runs_root,
+        target_id=target_id,
+        language="python",
+        primary_file="dummy.py",
+        snapshot_root=snapshot_root,
+    )
+
+    def fake_llm_run(self, model: str, command: str, prompt: str) -> CLIExecutionResult:  # noqa: ARG001
+        payload = {
+            "should_attempt": True,
+            "execution_target": "host_docker",
+            "prepare_commands": ["docker pull busybox:latest"],
+            "verify_command": "docker run --rm busybox:latest sh -lc 'echo SIGNAL_OK'",
+            "trigger_kind": "none",
+            "command": "",
+            "pov_stdin": "",
+            "expected_signal": "SIGNAL_OK",
+            "confidence": 0.93,
+            "rationale": "host docker check",
+        }
+        return CLIExecutionResult(model="codex", ok=True, returncode=0, stdout=json.dumps(payload), stderr="")
+
+    calls: list[tuple[str, str, int]] = []
+
+    def fake_host_run(command: str, cwd: str, timeout_seconds: int) -> tuple[int, str, str, str]:
+        calls.append((command, cwd, timeout_seconds))
+        if "docker pull" in command:
+            return 0, "pulled", "", ""
+        return 0, "SIGNAL_OK observed", "", ""
+
+    monkeypatch.setattr("src.v2.validate.CLIModelExecutor.run", fake_llm_run)
+    monkeypatch.setattr("src.v2.validate._run_host_command", fake_host_run)
+
+    cfg = _base_config()
+    cfg["validation"]["execution_owner"] = "codex-host"
+    json_report, _ = run_validate_multishot(
+        run_id=run_id,
+        runs_root=str(runs_root),
+        config=cfg,
+        verify_runs=2,
+        strategy="test_runner",
+        max_shots=2,
+        codex_cli="codex exec -",
+        execution_owner="codex-host",
+    )
+
+    assert len(calls) == 2
+    assert "docker pull" in calls[0][0]
+    assert "docker run" in calls[1][0]
+    assert calls[0][1] == str(snapshot_root)
+
+    report = json.loads(Path(json_report).read_text(encoding="utf-8"))
+    finding = report["targets"][0]["final_findings"][0]
+    evidence = finding["validation_evidence"][0]
+    assert finding["final_status"] == "confirmed"
+    assert evidence["execution_owner"] == "codex-host"
+    assert evidence["verify_command"].startswith("docker run")
+    assert evidence["expected_signal"] == "SIGNAL_OK"
+    assert evidence["signal_matched"] is True
+    assert evidence["is_positive"] is True
+
+
+def test_multishot_rejects_skip_strategy(tmp_path: Path) -> None:
+    run_id = "multishot-skip"
+    target_id = "target-python-03"
+    runs_root = tmp_path / "runs"
+    snapshot_root = runs_root / run_id / "snapshots" / target_id
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    (snapshot_root / "dummy.py").write_text("print('ok')\n", encoding="utf-8")
+
+    _write_minimal_run(
+        run_id=run_id,
+        runs_root=runs_root,
+        target_id=target_id,
+        language="python",
+        primary_file="dummy.py",
+        snapshot_root=snapshot_root,
+    )
+
+    cfg = _base_config()
+    try:
+        run_validate_multishot(
+            run_id=run_id,
+            runs_root=str(runs_root),
+            config=cfg,
+            verify_runs=2,
+            strategy="skip",
+            max_shots=2,
+            codex_cli="codex exec -",
+            execution_owner="oracle",
+        )
+    except RuntimeError as exc:
+        assert "skip" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected RuntimeError for skip strategy")
+
+
+def test_multishot_fails_when_no_runtime_evidence(monkeypatch, tmp_path: Path) -> None:
+    run_id = "multishot-no-runtime"
+    target_id = "target-python-04"
+    runs_root = tmp_path / "runs"
+    snapshot_root = runs_root / run_id / "snapshots" / target_id
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    (snapshot_root / "dummy.py").write_text("print('ok')\n", encoding="utf-8")
+
+    _write_minimal_run(
+        run_id=run_id,
+        runs_root=runs_root,
+        target_id=target_id,
+        language="python",
+        primary_file="dummy.py",
+        snapshot_root=snapshot_root,
+    )
+
+    def fake_llm_run(self, model: str, command: str, prompt: str) -> CLIExecutionResult:  # noqa: ARG001
+        payload = {
+            "should_attempt": False,
+            "execution_target": "host_docker",
+            "prepare_commands": [],
+            "verify_command": "",
+            "trigger_kind": "none",
+            "command": "",
+            "pov_stdin": "",
+            "expected_signal": "",
+            "confidence": 0.2,
+            "rationale": "do not attempt",
+        }
+        return CLIExecutionResult(model="codex", ok=True, returncode=0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("src.v2.validate.CLIModelExecutor.run", fake_llm_run)
+
+    cfg = _base_config()
+    cfg["validation"]["execution_owner"] = "codex-host"
+    try:
+        run_validate_multishot(
+            run_id=run_id,
+            runs_root=str(runs_root),
+            config=cfg,
+            verify_runs=2,
+            strategy="test_runner",
+            max_shots=2,
+            codex_cli="codex exec -",
+            execution_owner="codex-host",
+        )
+    except RuntimeError as exc:
+        assert "Runtime evidence missing" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected RuntimeError for missing runtime evidence")

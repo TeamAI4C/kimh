@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,49 @@ from src.v2.contracts import (
 from src.v2.llm_cli import CLIModelExecutor, TriggerPlan, parse_trigger_plan
 from src.v2.reporting import write_validation_reports
 from src.v2.storage import append_event, ensure_run_layout, read_json, write_json
+
+_TECHNICAL_VERDICTS = {
+    "timeout",
+    "unknown",
+    "compile_error",
+    "patch_error",
+    "codex_error",
+    "codex_parse_error",
+    "codex_no_pov_plan",
+    "host_prepare_error",
+    "host_verify_error",
+}
+
+def _require_non_skip_strategy(strategy: str) -> None:
+    if strategy == "skip":
+        raise RuntimeError("Validation strategy 'skip' is not allowed for V2 real verification runs.")
+
+
+def _has_runtime_evidence(evidences: list[ValidationEvidence]) -> bool:
+    return any(ev.executed for ev in evidences)
+
+
+def _contains_signal(text: str, expected_signal: str) -> bool:
+    if not expected_signal:
+        return False
+    return expected_signal.lower() in text.lower()
+
+
+def _run_host_command(command: str, cwd: str, timeout_seconds: int) -> tuple[int, str, str, str]:
+    """Run a host command through bash and return (exit, stdout, stderr, error-kind)."""
+    try:
+        proc = subprocess.run(
+            ["bash", "-lc", command],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        return int(proc.returncode), proc.stdout or "", proc.stderr or "", ""
+    except subprocess.TimeoutExpired as exc:
+        return -1, exc.stdout or "", exc.stderr or "", "timeout"
+    except Exception as exc:  # pragma: no cover - defensive
+        return -1, "", str(exc), "error"
 
 
 def _to_adjudication_record(raw: dict[str, Any]) -> AdjudicationRecord:
@@ -92,20 +136,7 @@ def resolve_final_status(
     if positives > 0:
         return FinalStatus.PROBABLE
 
-    technical = sum(
-        1
-        for e in evidences
-        if e.verdict
-        in {
-            "timeout",
-            "unknown",
-            "compile_error",
-            "patch_error",
-            "codex_error",
-            "codex_parse_error",
-            "codex_no_pov_plan",
-        }
-    )
+    technical = sum(1 for e in evidences if e.verdict in _TECHNICAL_VERDICTS)
     if technical > 0:
         return FinalStatus.NEEDS_HUMAN_REVIEW
     return FinalStatus.REJECTED
@@ -131,19 +162,7 @@ def _resolve_multishot_status(
     if not evidences:
         return FinalStatus.NEEDS_HUMAN_REVIEW
 
-    technical = any(
-        e.verdict
-        in {
-            "timeout",
-            "unknown",
-            "compile_error",
-            "patch_error",
-            "codex_error",
-            "codex_parse_error",
-            "codex_no_pov_plan",
-        }
-        for e in evidences
-    )
+    technical = any(e.verdict in _TECHNICAL_VERDICTS for e in evidences)
     if technical:
         return FinalStatus.NEEDS_HUMAN_REVIEW
     return FinalStatus.REJECTED
@@ -162,10 +181,13 @@ def _build_trigger_prompt(
 ) -> str:
     schema = {
         "should_attempt": "boolean",
-        "trigger_kind": "one of: none | command | pov_stdin",
+        "execution_target": "one of: host_docker | ''",
+        "prepare_commands": ["string"],
+        "verify_command": "string",
+        "trigger_kind": "one of: none | command | pov_stdin (oracle mode compatibility)",
         "command": "string",
         "pov_stdin": "string",
-        "expected_signal": "string",
+        "expected_signal": "string (required for codex-host execution)",
         "confidence": "number(0.0~1.0)",
         "rationale": "string",
     }
@@ -187,6 +209,13 @@ def _attempt_stub(e: ValidationEvidence) -> dict[str, Any]:
         "shot": e.run_index,
         "verdict": e.verdict,
         "is_positive": e.is_positive,
+        "executed": e.executed,
+        "execution_owner": e.execution_owner,
+        "execution_target": e.execution_target,
+        "prepare_commands": e.prepare_commands,
+        "verify_command": e.verify_command,
+        "expected_signal": e.expected_signal,
+        "signal_matched": e.signal_matched,
         "plan_confidence": e.plan_confidence,
         "trigger_kind": e.trigger_kind,
         "trigger_command": e.trigger_command,
@@ -229,6 +258,7 @@ def run_validate(
     config: dict[str, Any],
     verify_runs: int,
     strategy: str,
+    execution_owner: str,
 ) -> tuple[str, str]:
     run_paths = ensure_run_layout(run_id, runs_root)
     events_path = run_paths["logs"] / "events.jsonl"
@@ -245,6 +275,7 @@ def run_validate(
 
     validation_cfg = config.get("validation", {})
     chosen_strategy = strategy if strategy != "auto" else validation_cfg.get("strategy", "auto")
+    _require_non_skip_strategy(str(chosen_strategy))
 
     append_event(
         events_path,
@@ -252,12 +283,15 @@ def run_validate(
             "ts": datetime.now(timezone.utc).isoformat(),
             "stage": "validate",
             "event": "start",
+            "run_id": run_id,
             "verify_runs": verify_runs,
             "strategy": chosen_strategy,
             "mode": "single-shot",
+            "execution_owner": execution_owner,
         },
     )
 
+    missing_runtime_evidence: list[str] = []
     for t in analyze.get("targets", []):
         target_id = str(t["target_id"])
         target_bundle = bundle_targets.get(target_id)
@@ -299,6 +333,9 @@ def run_validate(
                                 verdict=oracle_result.verdict.value,
                                 exit_code=int(oracle_result.exit_code),
                                 is_positive=is_positive,
+                                executed=True,
+                                execution_owner="oracle",
+                                execution_target="oracle_sandbox",
                                 stdout_tail=oracle_result.stdout[-2000:] if oracle_result.stdout else "",
                                 stderr_tail=oracle_result.stderr[-2000:] if oracle_result.stderr else "",
                                 asan_report=oracle_result.asan_report,
@@ -311,8 +348,25 @@ def run_validate(
                             verdict="unknown",
                             exit_code=-1,
                             is_positive=False,
+                            executed=False,
+                            execution_owner="oracle",
+                            execution_target="oracle_sandbox",
                             stderr_tail="ASAN validation requires source_file but no location was provided.",
                         )
+                    )
+
+            if finding.get("final_decision") == "consensus" and finding.get("consensus_vulnerable") is True:
+                if not _has_runtime_evidence(evidences):
+                    missing_runtime_evidence.append(str(finding.get("finding_id")))
+                    append_event(
+                        events_path,
+                        {
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "stage": "validate",
+                            "event": "runtime_evidence_missing",
+                            "target_id": target_id,
+                            "finding_id": str(finding.get("finding_id")),
+                        },
                     )
 
             status = resolve_final_status(
@@ -391,6 +445,12 @@ def run_validate(
         },
     )
 
+    if missing_runtime_evidence:
+        raise RuntimeError(
+            "Runtime evidence missing for consensus-vulnerable findings: "
+            + ", ".join(missing_runtime_evidence[:20])
+        )
+
     return str(json_path), str(html_path)
 
 
@@ -403,6 +463,7 @@ def run_validate_multishot(
     strategy: str,
     max_shots: int,
     codex_cli: str,
+    execution_owner: str,
 ) -> tuple[str, str]:
     run_paths = ensure_run_layout(run_id, runs_root)
     events_path = run_paths["logs"] / "events.jsonl"
@@ -418,6 +479,10 @@ def run_validate_multishot(
     validation_cfg = config.get("validation", {})
     analysis_cfg = config.get("analysis", {})
     chosen_strategy = strategy if strategy != "auto" else validation_cfg.get("strategy", "auto")
+    _require_non_skip_strategy(str(chosen_strategy))
+    chosen_owner = execution_owner or str(validation_cfg.get("execution_owner", "codex-host"))
+    if chosen_owner not in {"codex-host", "oracle"}:
+        raise RuntimeError(f"Unsupported execution_owner: {chosen_owner}")
 
     timeout_seconds = int(analysis_cfg.get("model_timeout_seconds", 300))
     executor = CLIModelExecutor(timeout_seconds=timeout_seconds)
@@ -450,9 +515,11 @@ def run_validate_multishot(
             "ts": datetime.now(timezone.utc).isoformat(),
             "stage": "validate",
             "event": "start",
+            "run_id": run_id,
             "verify_runs": verify_runs,
             "strategy": chosen_strategy,
             "mode": "multi-shot",
+            "execution_owner": chosen_owner,
             "max_shots": max_shots,
             "required_positive": required_positive,
             "force_codex_pov_for_asan": force_codex_pov_for_asan,
@@ -460,6 +527,7 @@ def run_validate_multishot(
     )
 
     target_results: list[ValidateTargetResult] = []
+    missing_runtime_evidence: list[str] = []
 
     for t in analyze.get("targets", []):
         target_id = str(t["target_id"])
@@ -514,6 +582,8 @@ def run_validate_multishot(
                             verdict="codex_error",
                             exit_code=raw.returncode,
                             is_positive=False,
+                            executed=False,
+                            execution_owner=chosen_owner,
                             stderr_tail=(raw.error or raw.stderr)[-2000:],
                         )
                         evidences.append(ev)
@@ -529,6 +599,8 @@ def run_validate_multishot(
                                 verdict="codex_parse_error",
                                 exit_code=-1,
                                 is_positive=False,
+                                executed=False,
+                                execution_owner=chosen_owner,
                                 stderr_tail=str(exc)[-2000:],
                             )
                             evidences.append(ev)
@@ -540,6 +612,12 @@ def run_validate_multishot(
                                     verdict="skipped",
                                     exit_code=0,
                                     is_positive=False,
+                                    executed=False,
+                                    execution_owner=chosen_owner,
+                                    execution_target=plan.execution_target,
+                                    prepare_commands=list(plan.prepare_commands),
+                                    verify_command=plan.verify_command,
+                                    expected_signal=plan.expected_signal,
                                     trigger_kind=plan.trigger_kind,
                                     trigger_command=plan.command,
                                     pov_preview=(plan.pov_stdin[:200] + ("..." if len(plan.pov_stdin) > 200 else "")),
@@ -563,102 +641,258 @@ def run_validate_multishot(
                                 )
                                 break
 
-                            pov_arg = target_bundle.get("pov_file")
-                            custom_test_cmd: str | None = None
-                            custom_run_cmd: str | None = None
-                            pov_artifact_path = ""
-                            pov_sha256 = ""
-
-                            if plan.trigger_kind == "pov_stdin" and plan.pov_stdin:
-                                pov_artifact_path, pov_sha256 = _persist_pov_artifact(
-                                    validate_dir=run_paths["validate"],
-                                    target_id=target_id,
-                                    finding_id=finding_id,
-                                    shot=shot,
-                                    pov_text=plan.pov_stdin,
-                                )
-                                pov_arg = pov_artifact_path
-                            elif plan.trigger_kind == "command" and plan.command.strip():
-                                if profile.sandbox_strategy == "asan":
-                                    custom_run_cmd = plan.command.strip()
-                                else:
-                                    custom_test_cmd = plan.command.strip()
-
-                            if profile.sandbox_strategy == "asan" and force_codex_pov_for_asan:
-                                has_codex_pov_control = bool(
-                                    (plan.trigger_kind == "pov_stdin" and plan.pov_stdin)
-                                    or (plan.trigger_kind == "command" and plan.command.strip())
-                                )
-                                if not has_codex_pov_control:
+                            if chosen_owner == "codex-host":
+                                verify_command = str(plan.verify_command or "").strip()
+                                expected_signal = str(plan.expected_signal or "").strip()
+                                if plan.execution_target != "host_docker":
                                     ev = ValidationEvidence(
                                         run_index=shot,
-                                        verdict="codex_no_pov_plan",
+                                        verdict="codex_parse_error",
                                         exit_code=-1,
                                         is_positive=False,
+                                        executed=False,
+                                        execution_owner=chosen_owner,
+                                        execution_target=plan.execution_target,
+                                        prepare_commands=list(plan.prepare_commands),
+                                        verify_command=verify_command,
+                                        expected_signal=expected_signal,
+                                        stderr_tail="execution_target must be 'host_docker' for codex-host mode.",
                                         trigger_kind=plan.trigger_kind,
                                         trigger_command=plan.command,
-                                        pov_preview=(plan.pov_stdin[:200] + ("..." if len(plan.pov_stdin) > 200 else "")),
                                         plan_confidence=plan.confidence,
                                         plan_rationale=plan.rationale,
                                     )
                                     evidences.append(ev)
                                     attempts_summary.append(_attempt_stub(ev))
-                                    append_event(
-                                        events_path,
-                                        {
-                                            "ts": datetime.now(timezone.utc).isoformat(),
-                                            "stage": "validate",
-                                            "event": "multishot_attempt",
-                                            "target_id": target_id,
-                                            "finding_id": finding_id,
-                                            "shot": shot,
-                                            "verdict": ev.verdict,
-                                            "is_positive": ev.is_positive,
-                                            "positives": positives,
-                                            "required_positive": required_positive,
-                                        },
+                                elif not verify_command:
+                                    ev = ValidationEvidence(
+                                        run_index=shot,
+                                        verdict="codex_parse_error",
+                                        exit_code=-1,
+                                        is_positive=False,
+                                        executed=False,
+                                        execution_owner=chosen_owner,
+                                        execution_target=plan.execution_target,
+                                        prepare_commands=list(plan.prepare_commands),
+                                        verify_command=verify_command,
+                                        expected_signal=expected_signal,
+                                        stderr_tail="verify_command is required for codex-host mode.",
+                                        trigger_kind=plan.trigger_kind,
+                                        trigger_command=plan.command,
+                                        plan_confidence=plan.confidence,
+                                        plan_rationale=plan.rationale,
                                     )
-                                    if codex_fail_streak >= 2:
-                                        break
-                                    continue
+                                    evidences.append(ev)
+                                    attempts_summary.append(_attempt_stub(ev))
+                                elif not expected_signal:
+                                    ev = ValidationEvidence(
+                                        run_index=shot,
+                                        verdict="codex_parse_error",
+                                        exit_code=-1,
+                                        is_positive=False,
+                                        executed=False,
+                                        execution_owner=chosen_owner,
+                                        execution_target=plan.execution_target,
+                                        prepare_commands=list(plan.prepare_commands),
+                                        verify_command=verify_command,
+                                        expected_signal=expected_signal,
+                                        stderr_tail="expected_signal is required for codex-host mode.",
+                                        trigger_kind=plan.trigger_kind,
+                                        trigger_command=plan.command,
+                                        plan_confidence=plan.confidence,
+                                        plan_rationale=plan.rationale,
+                                    )
+                                    evidences.append(ev)
+                                    attempts_summary.append(_attempt_stub(ev))
+                                else:
+                                    timeout = int(validation_cfg.get("timeout_seconds", 120))
+                                    project_cwd = str(t.get("snapshot_root", ""))
+                                    prepare_error = ""
+                                    prepare_out = ""
+                                    prepare_err = ""
+                                    prepare_exit = 0
+                                    prepare_failed = False
+                                    for prep_cmd in plan.prepare_commands:
+                                        rc, out, err, err_kind = _run_host_command(prep_cmd, project_cwd, timeout)
+                                        if err_kind == "timeout":
+                                            prepare_failed = True
+                                            prepare_error = "timeout"
+                                            prepare_exit = -1
+                                            prepare_out, prepare_err = out, err
+                                            break
+                                        if err_kind:
+                                            prepare_failed = True
+                                            prepare_error = "error"
+                                            prepare_exit = -1
+                                            prepare_out, prepare_err = out, err
+                                            break
+                                        if rc != 0:
+                                            prepare_failed = True
+                                            prepare_error = "nonzero"
+                                            prepare_exit = rc
+                                            prepare_out, prepare_err = out, err
+                                            break
 
-                            if profile.sandbox_strategy == "asan" and not source_abs:
-                                oracle_result = _oracle_unknown(
-                                    "ASAN validation requires source_file but no location was provided."
-                                )
+                                    if prepare_failed:
+                                        verdict = "timeout" if prepare_error == "timeout" else "host_prepare_error"
+                                        ev = ValidationEvidence(
+                                            run_index=shot,
+                                            verdict=verdict,
+                                            exit_code=prepare_exit,
+                                            is_positive=False,
+                                            executed=True,
+                                            execution_owner=chosen_owner,
+                                            execution_target=plan.execution_target,
+                                            prepare_commands=list(plan.prepare_commands),
+                                            verify_command=verify_command,
+                                            expected_signal=expected_signal,
+                                            signal_matched=False,
+                                            stdout_tail=prepare_out[-2000:] if prepare_out else "",
+                                            stderr_tail=prepare_err[-2000:] if prepare_err else "",
+                                            trigger_kind=plan.trigger_kind,
+                                            trigger_command=plan.command,
+                                            plan_confidence=plan.confidence,
+                                            plan_rationale=plan.rationale,
+                                        )
+                                        evidences.append(ev)
+                                        attempts_summary.append(_attempt_stub(ev))
+                                    else:
+                                        rc, out, err, err_kind = _run_host_command(verify_command, project_cwd, timeout)
+                                        full_output = f"{out}\n{err}".strip()
+                                        matched = _contains_signal(full_output, expected_signal)
+                                        is_positive = matched
+                                        if is_positive:
+                                            positives += 1
+                                        if err_kind == "timeout":
+                                            verdict = "timeout"
+                                        elif err_kind:
+                                            verdict = "host_verify_error"
+                                        else:
+                                            verdict = "host_verify_match" if matched else "host_verify_no_match"
+                                        ev = ValidationEvidence(
+                                            run_index=shot,
+                                            verdict=verdict,
+                                            exit_code=rc,
+                                            is_positive=is_positive,
+                                            executed=True,
+                                            execution_owner=chosen_owner,
+                                            execution_target=plan.execution_target,
+                                            prepare_commands=list(plan.prepare_commands),
+                                            verify_command=verify_command,
+                                            expected_signal=expected_signal,
+                                            signal_matched=matched,
+                                            stdout_tail=out[-2000:] if out else "",
+                                            stderr_tail=err[-2000:] if err else "",
+                                            trigger_kind=plan.trigger_kind,
+                                            trigger_command=plan.command,
+                                            plan_confidence=plan.confidence,
+                                            plan_rationale=plan.rationale,
+                                        )
+                                        evidences.append(ev)
+                                        attempts_summary.append(_attempt_stub(ev))
                             else:
-                                oracle_result = oracle.run(
-                                    source_file=source_abs if profile.sandbox_strategy == "asan" else None,
-                                    pov_file=pov_arg,
-                                    patch_file=None,
-                                    language_profile=profile,
-                                    project_root=t.get("snapshot_root"),
-                                    custom_test_command=custom_test_cmd,
-                                    custom_run_command=custom_run_cmd,
+                                pov_arg = target_bundle.get("pov_file")
+                                custom_test_cmd: str | None = None
+                                custom_run_cmd: str | None = None
+                                pov_artifact_path = ""
+                                pov_sha256 = ""
+
+                                if plan.trigger_kind == "pov_stdin" and plan.pov_stdin:
+                                    pov_artifact_path, pov_sha256 = _persist_pov_artifact(
+                                        validate_dir=run_paths["validate"],
+                                        target_id=target_id,
+                                        finding_id=finding_id,
+                                        shot=shot,
+                                        pov_text=plan.pov_stdin,
+                                    )
+                                    pov_arg = pov_artifact_path
+                                elif plan.trigger_kind == "command" and plan.command.strip():
+                                    if profile.sandbox_strategy == "asan":
+                                        custom_run_cmd = plan.command.strip()
+                                    else:
+                                        custom_test_cmd = plan.command.strip()
+
+                                if profile.sandbox_strategy == "asan" and force_codex_pov_for_asan:
+                                    has_codex_pov_control = bool(
+                                        (plan.trigger_kind == "pov_stdin" and plan.pov_stdin)
+                                        or (plan.trigger_kind == "command" and plan.command.strip())
+                                    )
+                                    if not has_codex_pov_control:
+                                        ev = ValidationEvidence(
+                                            run_index=shot,
+                                            verdict="codex_no_pov_plan",
+                                            exit_code=-1,
+                                            is_positive=False,
+                                            executed=False,
+                                            execution_owner="oracle",
+                                            execution_target="oracle_sandbox",
+                                            trigger_kind=plan.trigger_kind,
+                                            trigger_command=plan.command,
+                                            pov_preview=(plan.pov_stdin[:200] + ("..." if len(plan.pov_stdin) > 200 else "")),
+                                            plan_confidence=plan.confidence,
+                                            plan_rationale=plan.rationale,
+                                        )
+                                        evidences.append(ev)
+                                        attempts_summary.append(_attempt_stub(ev))
+                                        append_event(
+                                            events_path,
+                                            {
+                                                "ts": datetime.now(timezone.utc).isoformat(),
+                                                "stage": "validate",
+                                                "event": "multishot_attempt",
+                                                "target_id": target_id,
+                                                "finding_id": finding_id,
+                                                "shot": shot,
+                                                "verdict": ev.verdict,
+                                                "is_positive": ev.is_positive,
+                                                "positives": positives,
+                                                "required_positive": required_positive,
+                                            },
+                                        )
+                                        if codex_fail_streak >= 2:
+                                            break
+                                        continue
+
+                                if profile.sandbox_strategy == "asan" and not source_abs:
+                                    oracle_result = _oracle_unknown(
+                                        "ASAN validation requires source_file but no location was provided."
+                                    )
+                                else:
+                                    oracle_result = oracle.run(
+                                        source_file=source_abs if profile.sandbox_strategy == "asan" else None,
+                                        pov_file=pov_arg,
+                                        patch_file=None,
+                                        language_profile=profile,
+                                        project_root=t.get("snapshot_root"),
+                                        custom_test_command=custom_test_cmd,
+                                        custom_run_command=custom_run_cmd,
+                                    )
+
+                                is_positive = _is_positive_evidence(oracle_result, profile.sandbox_strategy)
+                                if is_positive:
+                                    positives += 1
+
+                                ev = ValidationEvidence(
+                                    run_index=shot,
+                                    verdict=oracle_result.verdict.value,
+                                    exit_code=int(oracle_result.exit_code),
+                                    is_positive=is_positive,
+                                    executed=True,
+                                    execution_owner="oracle",
+                                    execution_target="oracle_sandbox",
+                                    stdout_tail=oracle_result.stdout[-2000:] if oracle_result.stdout else "",
+                                    stderr_tail=oracle_result.stderr[-2000:] if oracle_result.stderr else "",
+                                    asan_report=oracle_result.asan_report,
+                                    trigger_kind=plan.trigger_kind,
+                                    trigger_command=plan.command,
+                                    pov_preview=(plan.pov_stdin[:200] + ("..." if len(plan.pov_stdin) > 200 else "")),
+                                    pov_artifact=pov_artifact_path,
+                                    pov_sha256=pov_sha256,
+                                    plan_confidence=plan.confidence,
+                                    plan_rationale=plan.rationale,
                                 )
-
-                            is_positive = _is_positive_evidence(oracle_result, profile.sandbox_strategy)
-                            if is_positive:
-                                positives += 1
-
-                            ev = ValidationEvidence(
-                                run_index=shot,
-                                verdict=oracle_result.verdict.value,
-                                exit_code=int(oracle_result.exit_code),
-                                is_positive=is_positive,
-                                stdout_tail=oracle_result.stdout[-2000:] if oracle_result.stdout else "",
-                                stderr_tail=oracle_result.stderr[-2000:] if oracle_result.stderr else "",
-                                asan_report=oracle_result.asan_report,
-                                trigger_kind=plan.trigger_kind,
-                                trigger_command=plan.command,
-                                pov_preview=(plan.pov_stdin[:200] + ("..." if len(plan.pov_stdin) > 200 else "")),
-                                pov_artifact=pov_artifact_path,
-                                pov_sha256=pov_sha256,
-                                plan_confidence=plan.confidence,
-                                plan_rationale=plan.rationale,
-                            )
-                            evidences.append(ev)
-                            attempts_summary.append(_attempt_stub(ev))
+                                evidences.append(ev)
+                                attempts_summary.append(_attempt_stub(ev))
 
                     last = evidences[-1]
                     append_event(
@@ -700,6 +934,22 @@ def run_validate_multishot(
                     remaining = max_shots - shot
                     if positives + remaining < required_positive:
                         break
+
+            if final_decision == "consensus" and consensus_vulnerable is True:
+                if not _has_runtime_evidence(evidences):
+                    missing_runtime_evidence.append(finding_id)
+                    append_event(
+                        events_path,
+                        {
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "stage": "validate",
+                            "event": "runtime_evidence_missing",
+                            "target_id": target_id,
+                            "finding_id": finding_id,
+                            "mode": "multi-shot",
+                            "execution_owner": chosen_owner,
+                        },
+                    )
 
             status = _resolve_multishot_status(
                 consensus_vulnerable=consensus_vulnerable,
@@ -777,5 +1027,11 @@ def run_validate_multishot(
             "mode": "multi-shot",
         },
     )
+
+    if missing_runtime_evidence:
+        raise RuntimeError(
+            "Runtime evidence missing for consensus-vulnerable findings: "
+            + ", ".join(missing_runtime_evidence[:20])
+        )
 
     return str(json_path), str(html_path)

@@ -13,8 +13,8 @@ The default policy is **detect_only=true** (no patch apply/commit/PR automation)
 
 ```bash
 findvuln ingest --manifest <manifest.yaml> --run-id <run_id>
-findvuln analyze --run-id <run_id> --topology parallel-adjudicated --max-rounds 6
-findvuln validate --run-id <run_id> --verify-runs 2 --strategy auto
+findvuln analyze --run-id <run_id> --topology parallel-adjudicated --max-rounds 6 --codex-ql --ql-max-queries 6 --ql-max-retries 2
+findvuln validate --run-id <run_id> --verify-runs 2 --strategy auto --execution-owner codex-host
 ```
 
 Codex single-pass mode (Codex CLI only):
@@ -32,6 +32,7 @@ findvuln validate --run-id <run_id> --multi-shot --max-shots 6 --strategy auto
 Multi-shot behavior:
 
 - Codex proposes per-shot trigger plans (`command` or `pov_stdin`)
+- Codex host-direct mode is supported via `--execution-owner codex-host`
 - For ASAN targets, Codex PoV control is enforced by default (`multishot_force_codex_pov_for_asan: true`)
 - PoV artifacts are persisted under `.findvuln/runs/<run_id>/validate/pov_artifacts/...`
 
@@ -40,6 +41,41 @@ Codex Markdown PoC report generation:
 ```bash
 findvuln validate --run-id <run_id> --multi-shot --max-shots 6 --strategy auto --poc-md
 ```
+
+End-to-end single command:
+
+```bash
+findvuln e2e --manifest <manifest.yaml> --run-id <run_id>
+```
+
+`e2e` runs:
+1. `ingest`
+2. `analyze` (default `parallel-adjudicated`, `pack+custom` with Codex-generated QL on by default)
+3. `validate --multi-shot --execution-owner codex-host`
+4. `poc-md`
+
+Analyze supports Codex QL generation controls:
+
+- `--codex-ql` / `--no-codex-ql`
+- `--ql-max-queries <N>` (default 6)
+- `--ql-max-retries <N>` (default 2)
+- `analysis.codex_ql.timeout_seconds` (`0` = no timeout, default `0`; set a positive value to enforce timeout)
+
+Generated query artifacts:
+
+- `.findvuln/runs/<run_id>/codeql_generated/<target_id>/generation_plan.json`
+- `.findvuln/runs/<run_id>/codeql_generated/<target_id>/compile_results.json`
+- `.findvuln/runs/<run_id>/codeql_generated/<target_id>/query-*.ql`
+
+Codex QL response tracking events (`logs/events.jsonl`):
+
+- `stage=codex_ql,event=model_request_start`
+- `stage=codex_ql,event=model_request_complete` (elapsed ms, return code, stdout/stderr byte size)
+
+Validation guardrails:
+
+- `strategy=skip` is rejected for V2 real-verification runs
+- consensus-vulnerable findings must contain at least one executed validation shot
 
 PoC Markdown report sections follow a bug bounty style format:
 
@@ -70,6 +106,9 @@ targets:
     language: cpp
     scan_mode: pack
     pov_file: /absolute/path/to/pov_input.txt
+    exclude_paths:
+      - "test/**"
+      - "tests/**"
 ```
 
 Supported target fields:
@@ -82,6 +121,7 @@ Supported target fields:
 - `scan_mode`: `pack|custom`
 - `codeql_db_path`: optional override for CodeQL DB path
 - `pov_file`: optional PoV input used by ASAN validation
+- `exclude_paths`: optional path globs for filtering findings by `primary_file`
 
 ## Outputs
 

@@ -195,9 +195,12 @@ def generate_poc_markdown_reports(
 
     include_statuses = poc_cfg.get(
         "include_statuses",
-        ["confirmed", "probable", "needs-human-review"],
+        ["confirmed", "probable"],
     )
     include_statuses = {str(x) for x in include_statuses}
+    include_statuses = include_statuses & {"confirmed", "probable"}
+    if not include_statuses:
+        include_statuses = {"confirmed", "probable"}
 
     max_reports = int(max_findings if max_findings is not None else poc_cfg.get("max_findings", 50))
     max_reports = max(1, max_reports)
@@ -331,6 +334,7 @@ def generate_poc_markdown_reports(
             "event": "complete",
             "generated_reports": len(records),
             "index_path": str(index_path),
+            "skip_reason": "no findings matched include_statuses" if not records else "",
         },
     )
 
