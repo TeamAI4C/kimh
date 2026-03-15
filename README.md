@@ -1,77 +1,119 @@
-# FindVuln – Automated Vulnerability Analysis & Patching Pipeline
+# FindVuln V2 - CLI-Heavy Parallel Adjudication
 
-**CodeQL (Static Analysis) → LLM (Agent + RAG) → Docker (Dynamic Verification via PoV)**
+FindVuln V2 runs a detect-only pipeline with explicit stages:
 
-## Directory Structure
+1. `ingest`: source sync + snapshot + file index + CodeQL input bundle
+2. `analyze`: CodeQL + parallel `Codex CLI` and `Claude CLI` adjudication loop
+3. `validate`: runtime validation and final report generation
+4. `validate --multi-shot`: Codex-triggered multi-shot verification loop with live report updates
 
+The default policy is **detect_only=true** (no patch apply/commit/PR automation).
+
+## Commands
+
+```bash
+findvuln ingest --manifest <manifest.yaml> --run-id <run_id>
+findvuln analyze --run-id <run_id> --topology parallel-adjudicated --max-rounds 6
+findvuln validate --run-id <run_id> --verify-runs 2 --strategy auto
 ```
-findVuln/
-├── config/
-│   └── settings.yaml              # All pipeline configuration
-├── data/
-│   ├── cve_corpus/                # JSON CVE entries for RAG ingestion
-│   │   ├── CVE-2023-0001-example.json
-│   │   └── CVE-2023-0002-example.json
-│   └── vectordb/                  # ChromaDB persistence (auto-created)
-├── src/
-│   ├── rag/
-│   │   └── ingest.py              # Corpus ingestion + VulnKnowledgeBase
-│   ├── codeql/
-│   │   ├── queries/
-│   │   │   ├── uaf_dataflow.ql    # Use-After-Free path query
-│   │   │   └── bof_dataflow.ql    # Buffer Overflow path query
-│   │   └── wrapper.py             # CodeQL CLI wrapper + SARIF parser
-│   ├── agent/
-│   │   ├── prompts/
-│   │   │   ├── system.txt         # System prompt (diff-only output)
-│   │   │   ├── analysis_template.txt   # First-attempt template
-│   │   │   └── feedback_template.txt   # Retry template with error log
-│   │   └── agent.py               # PatchAgent (LangChain + diff extraction)
-│   ├── sandbox/
-│   │   ├── docker/
-│   │   │   ├── Dockerfile         # ASAN-enabled Ubuntu build image
-│   │   │   └── entrypoint.sh      # Compile → patch → run script
-│   │   └── oracle.py              # SandboxOracle (Docker API driver)
-│   └── orchestrator/
-│       └── main.py                # Full pipeline + feedback loop
-└── pyproject.toml
+
+Codex single-pass mode (Codex CLI only):
+
+```bash
+findvuln analyze --run-id <run_id> --topology codex-single-pass
 ```
+
+Codex multi-shot verification mode:
+
+```bash
+findvuln validate --run-id <run_id> --multi-shot --max-shots 6 --strategy auto
+```
+
+Multi-shot behavior:
+
+- Codex proposes per-shot trigger plans (`command` or `pov_stdin`)
+- For ASAN targets, Codex PoV control is enforced by default (`multishot_force_codex_pov_for_asan: true`)
+- PoV artifacts are persisted under `.findvuln/runs/<run_id>/validate/pov_artifacts/...`
+
+Codex Markdown PoC report generation:
+
+```bash
+findvuln validate --run-id <run_id> --multi-shot --max-shots 6 --strategy auto --poc-md
+```
+
+PoC Markdown report sections follow a bug bounty style format:
+
+- Descriptive Title
+- Summary & Impact
+- Affected Systems
+- Steps to Reproduce (STR)
+- Evidence (Proof)
+- Remediation / Recommendation
+
+Recommended Codex CLI baseline for V2:
+
+```bash
+codex exec --model gpt-5.3-codex -c 'reasoning_effort="xhigh"' --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -
+```
+
+Default prompt template path:
+
+- `src/v2/prompts/codex_default_prompt.txt`
+- `src/v2/prompts/codex_trigger_prompt.txt`
+
+## Manifest (example)
+
+```yaml
+targets:
+  - name: demo-cpp
+    source_root: /absolute/path/to/repo
+    language: cpp
+    scan_mode: pack
+    pov_file: /absolute/path/to/pov_input.txt
+```
+
+Supported target fields:
+
+- `name`: label for the run target
+- `source_root`: local repository path (or use `git_url`)
+- `git_url`: remote git URL for mirror + snapshot sync
+- `ref`: optional git ref/commit to checkout
+- `language`: `auto|cpp|python|javascript|java|go|rust|ruby|csharp|swift`
+- `scan_mode`: `pack|custom`
+- `codeql_db_path`: optional override for CodeQL DB path
+- `pov_file`: optional PoV input used by ASAN validation
+
+## Outputs
+
+Run artifacts are written under:
+
+- `.findvuln/runs/<run_id>/ingest/scan_bundle.json`
+- `.findvuln/runs/<run_id>/analyze/analyze_result.json`
+- `.findvuln/runs/<run_id>/validate/final_report.json`
+- `.findvuln/runs/<run_id>/validate/final_report.html`
+- `.findvuln/runs/<run_id>/validate/multishot_live_report.json` (when `--multi-shot`)
+- `.findvuln/runs/<run_id>/validate/poc_reports/*/*.md` (when `--poc-md`)
+- `.findvuln/runs/<run_id>/validate/poc_reports/poc_reports_index.json` (when `--poc-md`)
+- `.findvuln/runs/<run_id>/logs/events.jsonl`
+
+Final statuses are one of:
+
+- `confirmed`
+- `probable`
+- `rejected`
+- `needs-human-review`
 
 ## Prerequisites
 
-| Tool          | Version  | Purpose                                  |
-|---------------|----------|------------------------------------------|
-| Python        | ≥ 3.10   | Core runtime                             |
-| gcc           | ≥ 11     | Compiling test targets with ASAN         |
-| Docker        | ≥ 24     | Sandbox containers (Phase 4)             |
-| CodeQL CLI    | ≥ 2.15   | Static analysis (Phase 2)                |
-| API keys      | —        | `OPENAI_API_KEY` and/or `ANTHROPIC_API_KEY` |
+- Python >= 3.10
+- CodeQL CLI
+- Docker (for sandbox validation)
+- `codex` CLI and `claude` CLI installed/authenticated
 
-## Setup
+## Legacy V1
 
-```bash
-# 1. Install Python dependencies
-pip install -e ".[dev]" --break-system-packages
-
-# 2. Set API keys
-export OPENAI_API_KEY="sk-..."        # for embeddings (Phase 1)
-export ANTHROPIC_API_KEY="sk-ant-..." # for LLM agent (Phase 3)
-
-# 3. Ingest the CVE corpus into ChromaDB
-python -m src.phase1_rag.ingest
-
-# 4. Build the Docker sandbox image
-cd src/phase4_sandbox/docker && docker build -t findvuln-sandbox:latest . && cd -
-```
-
-## Running the Full Pipeline
+The old monolithic pipeline is still available as:
 
 ```bash
-python -m src.orchestrator.main \
-    path/to/source_root \
-    path/to/vulnerable_file.c \
-    path/to/codeql_db \
-    path/to/pov_input.txt
+findvuln-v1 ...
 ```
-
-The orchestrator will: run CodeQL → query RAG → generate patch → verify in sandbox → retry on failure (up to 5 times).

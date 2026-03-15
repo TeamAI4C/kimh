@@ -77,18 +77,24 @@ class SandboxOracle:
         compiler: str = "gcc",
         verification_strategy: str = "auto",
     ):
-        self.client = docker.from_env()
+        self.client = None
         self.timeout = timeout
         self.asan_flags = asan_flags
         self.compiler = compiler
         self.verification_strategy = verification_strategy
 
+    def _get_client(self):
+        if self.client is None:
+            self.client = docker.from_env()
+        return self.client
+
     # -- Image management ---------------------------------------------------
 
     def build_image(self, force: bool = False) -> None:
         """Build the C/C++ ASAN sandbox Docker image."""
+        client = self._get_client()
         try:
-            self.client.images.get(self.IMAGE_TAG)
+            client.images.get(self.IMAGE_TAG)
             if not force:
                 logger.info("Image %s already exists.", self.IMAGE_TAG)
                 return
@@ -96,7 +102,7 @@ class SandboxOracle:
             pass
 
         logger.info("Building sandbox image from %s …", self.DOCKERFILE_DIR)
-        self.client.images.build(
+        client.images.build(
             path=str(self.DOCKERFILE_DIR),
             tag=self.IMAGE_TAG,
             rm=True,
@@ -110,9 +116,10 @@ class SandboxOracle:
     ) -> str:
         """Build a multi-language Docker image for the given language."""
         tag = f"{self.MULTILANG_IMAGE_PREFIX}{language_profile.codeql_language}:latest"
+        client = self._get_client()
 
         try:
-            self.client.images.get(tag)
+            client.images.get(tag)
             if not force:
                 logger.info("Image %s already exists.", tag)
                 return tag
@@ -126,7 +133,7 @@ class SandboxOracle:
             )
 
         logger.info("Building multi-lang image %s …", tag)
-        self.client.images.build(
+        client.images.build(
             path=str(self.DOCKERFILE_DIR),
             dockerfile="Dockerfile.multilang",
             tag=tag,
@@ -146,6 +153,8 @@ class SandboxOracle:
         extra_files: dict[str, str | Path] | None = None,
         language_profile: LanguageProfile | None = None,
         project_root: str | Path | None = None,
+        custom_test_command: str | None = None,
+        custom_run_command: str | None = None,
     ) -> OracleResult:
         """Run the sandbox verification.
 
@@ -164,13 +173,14 @@ class SandboxOracle:
             )
 
         if strategy == "asan":
-            return self._run_asan(source_file, pov_file, patch_file, extra_files)
+            return self._run_asan(source_file, pov_file, patch_file, extra_files, custom_run_command)
 
         if strategy in ("test_runner", "build_and_test"):
             return self._run_project_tests(
                 project_root=project_root,
                 patch_file=patch_file,
                 language_profile=language_profile,
+                custom_test_command=custom_test_command,
             )
 
         # Fallback: unknown strategy → skip
@@ -199,13 +209,14 @@ class SandboxOracle:
         pov_file: str | Path | None,
         patch_file: str | Path | None,
         extra_files: dict[str, str | Path] | None,
+        custom_run_command: str | None = None,
     ) -> OracleResult:
         """Original C/C++ ASAN verification pipeline."""
         self.build_image()
 
         staging = Path(tempfile.mkdtemp(prefix="findvuln_"))
         try:
-            return self._run_asan_inner(staging, source_file, pov_file, patch_file, extra_files)
+            return self._run_asan_inner(staging, source_file, pov_file, patch_file, extra_files, custom_run_command)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
@@ -216,6 +227,7 @@ class SandboxOracle:
         pov_file: str | Path | None,
         patch_file: str | Path | None,
         extra_files: dict[str, str | Path] | None,
+        custom_run_command: str | None = None,
     ) -> OracleResult:
         # Copy source
         src = Path(source_file)
@@ -235,6 +247,9 @@ class SandboxOracle:
             shutil.copy2(pov, staging / pov.name)
             env["POV_FILE"] = f"/workspace/{pov.name}"
 
+        if custom_run_command:
+            env["CUSTOM_RUN_CMD"] = custom_run_command
+
         # Copy patch
         if patch_file:
             pf = Path(patch_file)
@@ -249,7 +264,7 @@ class SandboxOracle:
         # Run the container
         logger.info("Starting ASAN sandbox container …")
         try:
-            container = self.client.containers.run(
+            container = self._get_client().containers.run(
                 image=self.IMAGE_TAG,
                 volumes={str(staging): {"bind": "/workspace", "mode": "rw"}},
                 environment=env,
@@ -293,6 +308,7 @@ class SandboxOracle:
         project_root: str | Path | None,
         patch_file: str | Path | None,
         language_profile: LanguageProfile | None,
+        custom_test_command: str | None = None,
     ) -> OracleResult:
         """Apply patch to a copy of the project and run its test suite."""
         if project_root is None:
@@ -332,6 +348,9 @@ class SandboxOracle:
                 shutil.copy2(pf, staging / pf.name)
                 env["PATCH_FILE"] = f"/staging/{pf.name}"
 
+            if custom_test_command:
+                env["CUSTOM_TEST_CMD"] = custom_test_command
+
             logger.info(
                 "Starting %s test container for %s …",
                 language_profile.display_name,
@@ -339,7 +358,7 @@ class SandboxOracle:
             )
 
             try:
-                container = self.client.containers.run(
+                container = self._get_client().containers.run(
                     image=image_tag,
                     volumes={
                         str(staged_project): {"bind": "/workspace", "mode": "rw"},

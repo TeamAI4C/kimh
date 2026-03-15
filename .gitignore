@@ -1,0 +1,9 @@
+# FindVuln runtime artifacts
+.findvuln/
+
+# Local cloned targets (embedded git repos)
+targets/neural-compressor/
+
+# Python caches
+__pycache__/
+*.py[cod]

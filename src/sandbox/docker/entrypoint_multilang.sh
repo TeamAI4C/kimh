@@ -7,11 +7,13 @@
 # Expected environment variables:
 #   LANG_ID     – language identifier (python, javascript, java, go, rust, ruby, csharp)
 #   PATCH_FILE  – (optional) path to a .diff to apply first
+#   CUSTOM_TEST_CMD – (optional) explicit command to run instead of default test runner
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
 LANG_ID="${LANG_ID:-python}"
 PATCH_FILE="${PATCH_FILE:-}"
+CUSTOM_TEST_CMD="${CUSTOM_TEST_CMD:-}"
 
 echo "=== FindVuln Multi-Language Sandbox ==="
 echo "Language: $LANG_ID"
@@ -33,6 +35,18 @@ fi
 
 # ── Step 2: Run language-specific tests ───────────────────────
 echo "--- Running tests for $LANG_ID"
+
+if [ -n "$CUSTOM_TEST_CMD" ]; then
+    echo "--- Running custom trigger command"
+    echo "    $CUSTOM_TEST_CMD"
+    set +e
+    bash -lc "$CUSTOM_TEST_CMD" 2>&1
+    EXIT_CODE=$?
+    set -e
+    echo ""
+    echo "--- EXIT_CODE=$EXIT_CODE"
+    exit $EXIT_CODE
+fi
 
 case "$LANG_ID" in
     python)

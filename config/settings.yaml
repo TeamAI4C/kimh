@@ -57,3 +57,44 @@ sandbox:
 orchestrator:
   max_feedback_loops: 5
   log_level: "INFO"
+
+# ──────────────────────────────────────────────
+# FindVuln V2 (CLI-heavy parallel adjudication)
+# ──────────────────────────────────────────────
+sync:
+  runs_root: ".findvuln/runs"
+
+analysis:
+  topology: "parallel-adjudicated"       # parallel-adjudicated | codex-single-pass
+  max_rounds: 6
+  min_consensus_confidence: 0.60
+  require_evidence: true
+  max_consecutive_failures: 2
+  model_timeout_seconds: 300
+  prompt_template_path: "src/v2/prompts/codex_default_prompt.txt"
+
+llm:
+  codex_cli: "codex exec --model gpt-5.3-codex -c 'reasoning_effort=\"xhigh\"' --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -"
+  claude_cli: "claude"
+
+validation:
+  verify_runs: 2
+  strategy: "auto"
+  timeout_seconds: 120
+  multishot_max_shots: 6
+  multishot_required_positive: 2
+  multishot_force_codex_pov_for_asan: true
+  trigger_prompt_template_path: "src/v2/prompts/codex_trigger_prompt.txt"
+  live_report_name: "multishot_live_report.json"
+
+reporting:
+  json_name: "final_report.json"
+  html_name: "final_report.html"
+
+poc_report:
+  enabled: true
+  output_dirname: "poc_reports"
+  prompt_template_path: "src/v2/prompts/codex_poc_report_prompt.txt"
+  timeout_seconds: 300
+  max_findings: 50
+  include_statuses: ["confirmed", "probable", "needs-human-review"]

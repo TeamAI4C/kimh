@@ -10,6 +10,7 @@
 #   PATCH_FILE    – (optional) path to a .diff to apply first
 #   ASAN_FLAGS    – compiler sanitizer flags
 #   COMPILER      – gcc or g++
+#   CUSTOM_RUN_CMD – (optional) explicit runtime command for trigger testing
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -19,6 +20,7 @@ SRC_FILE="${SRC_FILE:-/workspace/target.c}"
 BINARY_NAME="${BINARY_NAME:-target}"
 POV_FILE="${POV_FILE:-/workspace/pov_input.txt}"
 PATCH_FILE="${PATCH_FILE:-}"
+CUSTOM_RUN_CMD="${CUSTOM_RUN_CMD:-}"
 
 echo "=== FindVuln Sandbox ==="
 echo "Source : $SRC_FILE"
@@ -51,7 +53,11 @@ echo "--- Compilation succeeded."
 echo "--- Running /workspace/$BINARY_NAME with PoV input"
 set +e   # don't exit on non-zero
 
-if [ -f "$POV_FILE" ]; then
+if [ -n "$CUSTOM_RUN_CMD" ]; then
+    echo "--- Running custom trigger command"
+    echo "    $CUSTOM_RUN_CMD"
+    bash -lc "$CUSTOM_RUN_CMD" 2>&1
+elif [ -f "$POV_FILE" ]; then
     /workspace/"$BINARY_NAME" < "$POV_FILE" 2>&1
 else
     /workspace/"$BINARY_NAME" 2>&1
